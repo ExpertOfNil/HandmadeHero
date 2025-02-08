@@ -16,16 +16,22 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
-static SDL_Texture* gTexture;
-static void* gBitmapMemory;
-static int gBitmapWidth;
-static int gBitmapHeight;
-static int gBytesPerPixel = 4;
+typedef struct OffScreenBuffer {
+    SDL_Texture* texture;
+    void* memory;
+    int width;
+    int height;
+    int pitch;
+} OffScreenBuffer;
+static OffScreenBuffer gBackBuffer = {0};
 
 static bool handleEvent(SDL_Event* event);
-static void ResizeTexture(SDL_Renderer* renderer, int width, int height);
-static void UpdateWindow(SDL_Window* window, SDL_Renderer* renderer);
-static void RenderWeirdGradient(int blue_offset, int green_offset);
+static void ResizeTexture(
+    OffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height);
+static void UpdateWindow(
+    SDL_Window* window, SDL_Renderer* renderer, OffScreenBuffer buffer);
+static void RenderWeirdGradient(
+    OffScreenBuffer buffer, int blue_offset, int green_offset);
 
 int main(int argc, char* argv[]) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -48,7 +54,7 @@ int main(int argc, char* argv[]) {
     int width;
     int height;
     SDL_GetWindowSize(window, &width, &height);
-    ResizeTexture(renderer, width, height);
+    ResizeTexture(&gBackBuffer, renderer, width, height);
     int xoffset = 0;
     int yoffset = 0;
     bool running = true;
@@ -60,8 +66,8 @@ int main(int argc, char* argv[]) {
                 running = false;
             }
         }
-        RenderWeirdGradient(xoffset, yoffset);
-        UpdateWindow(window, renderer);
+        RenderWeirdGradient(gBackBuffer, xoffset, yoffset);
+        UpdateWindow(window, renderer, gBackBuffer);
         xoffset += 1;
         yoffset += 2;
     }
@@ -82,9 +88,6 @@ bool handleEvent(SDL_Event* event) {
                 "SDL_EVENT_WINDOW_RESIZED (%d, %d)\n",
                 event->window.data1,
                 event->window.data2);
-            SDL_Window* window = SDL_GetWindowFromID(event->window.windowID);
-            SDL_Renderer* renderer = SDL_GetRenderer(window);
-            ResizeTexture(renderer, event->window.data1, event->window.data2);
         } break;
         case SDL_EVENT_WINDOW_FOCUS_GAINED: {
             printf("SDL_EVENT_WINDOW_FOCUS_GAINED\n");
@@ -92,45 +95,49 @@ bool handleEvent(SDL_Event* event) {
         case SDL_EVENT_WINDOW_EXPOSED: {
             SDL_Window* window = SDL_GetWindowFromID(event->window.windowID);
             SDL_Renderer* renderer = SDL_GetRenderer(window);
-            UpdateWindow(window, renderer);
+            UpdateWindow(window, renderer, gBackBuffer);
         } break;
     }
     return (should_quit);
 }
 
-void ResizeTexture(SDL_Renderer* renderer, int width, int height) {
-    if (gBitmapMemory != NULL) {
-        munmap(gBitmapMemory, gBitmapWidth * gBitmapHeight * gBytesPerPixel);
+void ResizeTexture(
+    OffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height) {
+    if (buffer->memory != NULL) {
+        munmap(buffer->memory, buffer->pitch * buffer->height);
     }
-    if (gTexture != NULL) {
-        SDL_DestroyTexture(gTexture);
+    if (buffer->texture != NULL) {
+        SDL_DestroyTexture(buffer->texture);
     }
-    gTexture = SDL_CreateTexture(
+    buffer->texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING,
         width,
         height);
 
-    gBitmapWidth = width;
-    gBitmapHeight = height;
-    gBitmapMemory = mmap(
+    buffer->width = width;
+    buffer->height = height;
+    // Pixels are always 32-bit, BGRA (0xAARRGGBB, little endian)
+    const int gBytesPerPixel = 4;
+    buffer->pitch = buffer->width * gBytesPerPixel;
+    buffer->memory = mmap(
         NULL,
-        width * height * gBytesPerPixel,
+        height * buffer->pitch,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
         0);
 }
 
-void UpdateWindow(SDL_Window* window, SDL_Renderer* renderer) {
-    if (!SDL_UpdateTexture(
-            gTexture, NULL, gBitmapMemory, gBitmapWidth * gBytesPerPixel)) {
+void UpdateWindow(
+    SDL_Window* window, SDL_Renderer* renderer, OffScreenBuffer buffer) {
+    if (!SDL_UpdateTexture(buffer.texture, NULL, buffer.memory, buffer.pitch)) {
         const char* err = SDL_GetError();
         fprintf(stderr, "ERROR: %s\n", err);
         return;
     }
-    if (!SDL_RenderTexture(renderer, gTexture, NULL, NULL)) {
+    if (!SDL_RenderTexture(renderer, buffer.texture, NULL, NULL)) {
         const char* err = SDL_GetError();
         fprintf(stderr, "ERROR: %s\n", err);
         return;
@@ -143,21 +150,19 @@ void UpdateWindow(SDL_Window* window, SDL_Renderer* renderer) {
     }
 }
 
-void RenderWeirdGradient(int blue_offset, int green_offset) {
-    int width = gBitmapWidth;
-    int height = gBitmapHeight;
-
-    int pitch = width * gBytesPerPixel;
-    u8* row = (u8*)gBitmapMemory;
-    for (int y = 0; y < gBitmapHeight; ++y) {
+void RenderWeirdGradient(
+    OffScreenBuffer buffer, int blue_offset, int green_offset) {
+    u8* row = (u8*)buffer.memory;
+    const int alpha = 255 << 24;
+    for (int y = 0; y < buffer.height; ++y) {
         u32* pixel = (u32*)row;
-        for (int x = 0; x < gBitmapWidth; ++x) {
+        for (int x = 0; x < buffer.width; ++x) {
             u8 blue = (x + blue_offset);
             u8 green = (y + green_offset);
             // NOTE: Alpha channel not explicitly set in Handmade Penguin source
-            *pixel = ((255 << 24) | (green << 8) | blue);
+            *pixel = (alpha | (green << 8) | blue);
             pixel += 1;
         }
-        row += pitch;
+        row += buffer.pitch;
     }
 }
