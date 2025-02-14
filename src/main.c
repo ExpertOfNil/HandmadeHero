@@ -36,7 +36,8 @@ typedef struct OffScreenBuffer {
 } OffScreenBuffer;
 
 static OffScreenBuffer gBackBuffer = {0};
-static int current_sine_sample = 0;
+static int gCurrentSineSample = 0;
+static int gSampleFreq = 48000;
 
 static bool handleEvent(SDL_Event* event);
 static void resizeTexture(
@@ -50,6 +51,8 @@ static void audioCallback(
     SDL_AudioStream* astream,
     int additional_amount,
     int total_amount);
+static float squareWave(int phase, float volume);
+static float sinWave(int phase, float volume);
 
 int main(int argc, char* argv[]) {
     if (!SDL_Init(
@@ -80,7 +83,7 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_AudioSpec spec = {};
-    spec.freq = 8000;
+    spec.freq = gSampleFreq;
     spec.format = SDL_AUDIO_F32;
     spec.channels = 1;
 
@@ -184,12 +187,12 @@ bool handleEvent(SDL_Event* event) {
             for (int i = 0; i < n_joysticks; ++i) {
                 SDL_Joystick* joystick = SDL_GetJoystickFromID(joystick_ids[i]);
                 if (NULL != joystick) {
-                    SDL_CloseJoystick(joystick);
-                    SDL_Log("Joystick %d closed.\n", joystick_ids[i]);
                     SDL_Haptic* haptic = SDL_OpenHapticFromJoystick(joystick);
                     if (NULL != haptic) {
                         SDL_Log("Haptic %d closed.\n", joystick_ids[i]);
                     }
+                    SDL_CloseJoystick(joystick);
+                    SDL_Log("Joystick %d closed.\n", joystick_ids[i]);
                 }
             }
             should_quit = true;
@@ -221,7 +224,10 @@ bool handleEvent(SDL_Event* event) {
                 SDL_Log("Joystick %d open.\n", id);
                 SDL_Haptic* haptic = SDL_OpenHapticFromJoystick(joystick);
                 if (NULL == haptic) {
-                    SDL_Log("No haptic available on joystick %d.\n", id);
+                    SDL_LogError(
+                        SDL_LOG_CATEGORY_INPUT,
+                        "Open haptic error. %s\n",
+                        SDL_GetError());
                 } else {
                     SDL_Log("Haptic %d open.\n", id);
                     if (SDL_InitHapticRumble(haptic)) {
@@ -335,13 +341,12 @@ void audioCallback(
 
         for (i = 0; i < total; i++) {
             const int freq = 200;
-            const float phase = current_sine_sample * freq / 8000.0f;
-            samples[i] = SDL_sinf(phase * 2 * SDL_PI_F);
-            current_sine_sample++;
+            samples[i] = sinWave(freq, 0.2);
+            gCurrentSineSample++;
         }
 
         /* wrapping around to avoid floating-point errors */
-        current_sine_sample %= 8000;
+        gCurrentSineSample %= gSampleFreq;
 
         /* feed the new data to the stream. It will queue at the end, and
          * trickle out as the hardware needs more data. */
@@ -349,4 +354,14 @@ void audioCallback(
         /* subtract what we've just fed the stream. */
         additional_amount -= total;
     }
+}
+
+float squareWave(int freq, float volume) {
+    int phase = gCurrentSineSample * freq / gSampleFreq;
+    return volume * (phase % 2);
+}
+
+float sinWave(int freq, float volume) {
+    float phase = gCurrentSineSample * freq / (float)gSampleFreq;
+    return volume * SDL_sinf(phase * 2 * SDL_PI_F);
 }
