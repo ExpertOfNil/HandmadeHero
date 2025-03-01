@@ -8,12 +8,12 @@
 #include <SDL3/SDL_oldnames.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <immintrin.h>
 
 #define MAX_CONTROLLERS 4
 
@@ -26,6 +26,9 @@ typedef int8_t i8;
 typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
+
+typedef float f32;
+typedef double f64;
 
 typedef struct OffScreenBuffer {
     SDL_Texture* texture;
@@ -105,6 +108,10 @@ int main(int argc, char* argv[]) {
     int yoffset = 0;
     bool running = true;
 
+    u64 perfCountFreq = SDL_GetPerformanceFrequency();
+    u64 lastCounter = SDL_GetPerformanceCounter();
+    u64 lastCycleCount = _rdtsc();
+
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -171,6 +178,20 @@ int main(int argc, char* argv[]) {
 
         renderWeirdGradient(gBackBuffer, xoffset, yoffset);
         updateWindow(window, renderer, gBackBuffer);
+
+        u64 endCounter = SDL_GetPerformanceCounter();
+        u64 endCycleCount = _rdtsc();
+
+        u64 counterElapsed = endCounter - lastCounter;
+        u64 cyclesElapsed = endCycleCount - lastCycleCount;
+
+        f64 frameDuration_ms = (1000.0f * (f64)counterElapsed) / (f64)perfCountFreq;
+        f64 fps = (f64)perfCountFreq / (f64)counterElapsed;
+        f64 frameDuration_Mc = (f64)cyclesElapsed / (1000.0f * 1000.0f);
+
+        printf("%.02f ms/f, %.02f fps, %.02f Mcpf\n", frameDuration_ms, fps, frameDuration_Mc);
+        lastCounter = endCounter;
+        lastCycleCount = endCycleCount;
     }
 
     SDL_Quit();
