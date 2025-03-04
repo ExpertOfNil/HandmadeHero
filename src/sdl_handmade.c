@@ -1,3 +1,22 @@
+/*
+ * TODO: THIS IS NOT A FINAL PLATFORM LAYER!!
+ *
+ * - Saved game locations
+ * - Getting a handle to our own executable file
+ * - Asset loading path
+ * - Threading (launch a thread)
+ * - Raw input (support for multiple keyboards)
+ * - Sleep/timeBeginPeriod
+ * - ClipCursor (for multimonitor support
+ * - Fullscreen support
+ * - Set cursor (control cursor visibility)
+ * - Query cancel autoplay
+ * - Activate app (when we are not the active application)
+ * - Blit speed improvements (BitBlt)
+ * - Hardware acceleration
+ * - Keyboard layout
+ */
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_events.h>
@@ -8,54 +27,44 @@
 #include <SDL3/SDL_oldnames.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
+#include <immintrin.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
-#include <immintrin.h>
+
+#include "handmade.c"
 
 #define MAX_CONTROLLERS 4
 
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-
-typedef int8_t i8;
-typedef int16_t i16;
-typedef int32_t i32;
-typedef int64_t i64;
-
-typedef float f32;
-typedef double f64;
-
-typedef struct OffScreenBuffer {
+typedef struct SdlOffScreenBuffer {
     SDL_Texture* texture;
     void* memory;
     int width;
     int height;
     int pitch;
-} OffScreenBuffer;
+} SdlOffScreenBuffer;
 
-static OffScreenBuffer gBackBuffer = {0};
-static int gCurrentSineSample = 0;
-static int gSampleFreq = 48000;
+typedef struct SdlSoundOutput {
+    int samples_hz;
+    int tone_hz;
+    f32 tone_volume;
+    u32 sample_index;
+    f32 t_sine;
+} SdlSoundOutput;
+
+static SdlOffScreenBuffer gBackBuffer = {0};
 
 static bool handleEvent(SDL_Event* event);
 static void resizeTexture(
-    OffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height);
+    SdlOffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height);
 static void updateWindow(
-    SDL_Window* window, SDL_Renderer* renderer, OffScreenBuffer buffer);
-static void renderWeirdGradient(
-    OffScreenBuffer buffer, int blue_offset, int green_offset);
+    SDL_Window* window, SDL_Renderer* renderer, SdlOffScreenBuffer buffer);
 static void audioCallback(
     void* userdata,
     SDL_AudioStream* astream,
     int additional_amount,
     int total_amount);
-static float squareWave(int phase, float volume);
-static float sinWave(int phase, float volume);
 
 int main(int argc, char* argv[]) {
     if (!SDL_Init(
@@ -85,13 +94,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    SdlSoundOutput sound_output = {
+        .samples_hz = 48000,
+        .tone_hz = 256,
+        .tone_volume = 1.0f,
+        .sample_index = 0,
+        .t_sine = 0.0f,
+    };
+
     SDL_AudioSpec spec = {};
-    spec.freq = gSampleFreq;
+    spec.freq = sound_output.samples_hz;
     spec.format = SDL_AUDIO_F32;
     spec.channels = 1;
 
     SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(
-        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, NULL);
+        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, &sound_output);
     if (!stream) {
         SDL_LogError(
             SDL_LOG_CATEGORY_AUDIO,
@@ -163,11 +180,24 @@ int main(int argc, char* argv[]) {
             // bool dnlt = dpad & 0x012;
             // bool uplt = dpad & 0x09;
 
+            i16 lstick_x = SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX);
+            i16 lstick_y = SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY);
+            i16 rstick_x = SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX);
+            i16 rstick_y = SDL_GetJoystickAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY);
+
             if (up) {
                 yoffset -= 1;
             } else if (dn) {
                 yoffset += 1;
             }
+
+            xoffset += lstick_x / 4096;
+            yoffset += lstick_y / 4096;
+
+            sound_output.tone_hz =
+                512 + (int)(256.0f * ((f32)lstick_y / 30000.0f));
+            f32 volume = ((f32)rstick_y / -32768.0f + 1.0f) / 2.0f;
+            sound_output.tone_volume = volume;
 
             if (lt) {
                 xoffset -= 1;
@@ -176,20 +206,33 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        renderWeirdGradient(gBackBuffer, xoffset, yoffset);
+        GameOffScreenBuffer buffer = {
+            .memory = gBackBuffer.memory,
+            .width = gBackBuffer.width,
+            .height = gBackBuffer.height,
+            .pitch = gBackBuffer.pitch,
+        };
+        gameUpdateAndRender(&buffer, xoffset, yoffset);
         updateWindow(window, renderer, gBackBuffer);
 
         u64 endCounter = SDL_GetPerformanceCounter();
         u64 endCycleCount = _rdtsc();
 
+#if 0
         u64 counterElapsed = endCounter - lastCounter;
         u64 cyclesElapsed = endCycleCount - lastCycleCount;
 
-        f64 frameDuration_ms = (1000.0f * (f64)counterElapsed) / (f64)perfCountFreq;
+        f64 frameDuration_ms =
+            (1000.0f * (f64)counterElapsed) / (f64)perfCountFreq;
         f64 fps = (f64)perfCountFreq / (f64)counterElapsed;
         f64 frameDuration_Mc = (f64)cyclesElapsed / (1000.0f * 1000.0f);
 
-        printf("%.02f ms/f, %.02f fps, %.02f Mcpf\n", frameDuration_ms, fps, frameDuration_Mc);
+        printf(
+            "%.02f ms/f, %.02f fps, %.02f Mcpf\n",
+            frameDuration_ms,
+            fps,
+            frameDuration_Mc);
+#endif
         lastCounter = endCounter;
         lastCycleCount = endCycleCount;
     }
@@ -275,7 +318,7 @@ bool handleEvent(SDL_Event* event) {
 }
 
 void resizeTexture(
-    OffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height) {
+    SdlOffScreenBuffer* buffer, SDL_Renderer* renderer, int width, int height) {
     if (buffer->memory != NULL) {
         munmap(buffer->memory, buffer->pitch * buffer->height);
     }
@@ -304,7 +347,7 @@ void resizeTexture(
 }
 
 void updateWindow(
-    SDL_Window* window, SDL_Renderer* renderer, OffScreenBuffer buffer) {
+    SDL_Window* window, SDL_Renderer* renderer, SdlOffScreenBuffer buffer) {
     if (!SDL_UpdateTexture(buffer.texture, NULL, buffer.memory, buffer.pitch)) {
         SDL_LogError(
             SDL_LOG_CATEGORY_ERROR,
@@ -329,29 +372,12 @@ void updateWindow(
     }
 }
 
-void renderWeirdGradient(
-    OffScreenBuffer buffer, int blue_offset, int green_offset) {
-    u8* row = (u8*)buffer.memory;
-    const int alpha = 255 << 24;
-    for (int y = 0; y < buffer.height; ++y) {
-        u32* pixel = (u32*)row;
-        for (int x = 0; x < buffer.width; ++x) {
-            u8 blue = (x + blue_offset);
-            u8 green = (y + green_offset);
-            /* NOTE: Alpha channel not explicitly set in Handmade Penguin
-             * source */
-            *pixel = (alpha | (green << 8) | blue);
-            pixel += 1;
-        }
-        row += buffer.pitch;
-    }
-}
-
 void audioCallback(
     void* userdata,
     SDL_AudioStream* astream,
     int additional_amount,
     int total_amount) {
+    SdlSoundOutput* sound = (SdlSoundOutput*)userdata;
     /* convert from bytes to samples */
     additional_amount /= sizeof(float);
     while (additional_amount > 0) {
@@ -361,13 +387,14 @@ void audioCallback(
         int i;
 
         for (i = 0; i < total; i++) {
-            const int freq = 200;
-            samples[i] = sinWave(freq, 0.2);
-            gCurrentSineSample++;
+            samples[i] = SDL_sinf(sound->t_sine) * sound->tone_volume;
+            sound->t_sine +=
+                2.0f * SDL_PI_F * (f32)sound->tone_hz / (f32)sound->samples_hz;
+            sound->sample_index++;
         }
 
         /* wrapping around to avoid floating-point errors */
-        gCurrentSineSample %= gSampleFreq;
+        sound->sample_index %= sound->samples_hz;
 
         /* feed the new data to the stream. It will queue at the end, and
          * trickle out as the hardware needs more data. */
@@ -375,14 +402,4 @@ void audioCallback(
         /* subtract what we've just fed the stream. */
         additional_amount -= total;
     }
-}
-
-float squareWave(int freq, float volume) {
-    int phase = gCurrentSineSample * freq / gSampleFreq;
-    return volume * (phase % 2);
-}
-
-float sinWave(int freq, float volume) {
-    float phase = gCurrentSineSample * freq / (float)gSampleFreq;
-    return volume * SDL_sinf(phase * 2 * SDL_PI_F);
 }
